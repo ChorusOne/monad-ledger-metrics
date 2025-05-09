@@ -1,0 +1,11 @@
+[package]
+name = "ledger-exporter"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+prometheus = { version = "0.14.0", default-features = false }
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.140"
+structopt = "0.3.26"
+tiny_http = "0.12.0"
