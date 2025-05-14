@@ -11,6 +11,36 @@ docker compose run --remove-orphans bft /usr/local/bin/ledger-tail | \
     ledger-exporter  --listen-addr 0.0.0.0:8001 --our-addresses 000000000000000000000000000000000000000000000000000000000000000000
 ```
 
+Alternatively, add the exporter to the docker compose file:
+
+```
+# Exports mpt metrics
+  ledger-exporter:
+    image: ${REPO_URL}/monad-bft:${IMAGE_TAG}
+    security_opt:
+      - seccomp:./profile.json
+    ports:
+      - "8001:8001"
+    volumes:
+      - your-path-to-monad/monad-bft:/monad
+      - your-path-to-ledger-metrics-exporter-binary:/ledger-exporter
+    command: sh -c '/usr/local/bin/ledger-tail | /ledger-exporter --listen-addr 0.0.0.0:8001 --our-addresses 03a835aa1476e90d170655f333ef910e24be174dbd7d1b4a099f6a596ec6f176cb'
+    networks:
+      - monad
+    devices:
+      - /dev/${TARGET_DRIVE}:/dev/${TARGET_DRIVE}
+    logging:
+      driver: journald
+      options:
+        tag: "monad-bft"
+    depends_on:
+      mpt:
+        condition: service_completed_successfully
+        required: false
+    environment:
+      - RUST_LOG=debug,h2=warn,tower=warn,monad_statesync=trace
+```
+
 The log lines look like:
 ```
 {"timestamp":"2025-05-08T17:39:50.022555Z","level":"INFO","fields":{"message":"proposed_block","round":"16652760","parent_round":"16652759","epoch":"319","seq_num":"15917009","num_tx":"55","author":"000000000000000000000000000000000000000000000000000000000000000000","block_ts_ms":"1746725989924","now_ts_ms":"1746725990022","author_dns":"monad-testnet.domain.com:8000"},"target":"ledger_tail"}
