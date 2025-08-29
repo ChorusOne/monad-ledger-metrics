@@ -161,12 +161,25 @@ fn parse_stdin(our_addresses: &[String]) -> std::io::Result<()> {
                     }
                     LogFields::FinalizedBlock { .. } => {}
                     LogFields::Timeout {
-                        round: _,
-                        author: _,
-                        now_ts_ms: _,
-                        author_dns: _,
-                        author_address: _,
-                    } => {}
+                        author,
+                        author_dns,
+                        author_address,
+                        ..
+                    } => {
+                        let operated_by_us: &str = if our_addresses.contains(&author) {
+                            "true"
+                        } else {
+                            "false"
+                        };
+                        skipped_blocks
+                            .with_label_values(&[
+                                author.as_str(),
+                                author_dns.as_deref().unwrap_or(""),
+                                author_address.as_deref().unwrap_or(""),
+                                operated_by_us,
+                            ])
+                            .inc();
+                    }
                 }
             }
             Err(e) => {
