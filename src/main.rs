@@ -59,6 +59,14 @@ pub enum LogFields {
         seq_num: String,
         block_ts_ms: String,
     },
+    #[serde(rename = "timeout")]
+    Timeout {
+        round: String,
+        author: String,
+        now_ts_ms: String,
+        author_dns: Option<String>,
+        author_address: Option<String>,
+    },
 }
 
 fn main() -> std::io::Result<()> {
@@ -152,6 +160,13 @@ fn parse_stdin(our_addresses: &[String]) -> std::io::Result<()> {
                             .inc();
                     }
                     LogFields::FinalizedBlock { .. } => {}
+                    LogFields::Timeout {
+                        round: _,
+                        author: _,
+                        now_ts_ms: _,
+                        author_dns: _,
+                        author_address: _,
+                    } => {}
                 }
             }
             Err(e) => {
