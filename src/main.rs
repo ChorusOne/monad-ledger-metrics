@@ -25,35 +25,40 @@ pub struct LogEntry {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-#[serde(untagged)]
+#[serde(tag = "message")]
 pub enum LogFields {
-    ProposedBlock(ProposedBlockFields),
-    SkippedBlock(SkippedBlockFields),
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct ProposedBlockFields {
-    pub message: String,
-    pub round: String,
-    pub author: String,
-    pub now_ts_ms: String,
-    pub author_dns: Option<String>,
-    pub author_address: Option<String>,
-    // unique fields
-    pub epoch: String,
-    pub seq_num: String,
-    pub num_tx: String,
-    pub block_ts_ms: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct SkippedBlockFields {
-    pub message: String,
-    pub round: String,
-    pub author: String,
-    pub now_ts_ms: String,
-    pub author_dns: Option<String>,
-    pub author_address: Option<String>,
+    #[serde(rename = "proposed_block")]
+    ProposedBlock {
+        round: String,
+        author: String,
+        now_ts_ms: String,
+        author_dns: Option<String>,
+        author_address: Option<String>,
+        // unique fields
+        epoch: String,
+        seq_num: String,
+        num_tx: String,
+        block_ts_ms: String,
+    },
+    #[serde(rename = "skipped_block")]
+    SkippedBlock {
+        round: String,
+        author: String,
+        now_ts_ms: String,
+        author_dns: Option<String>,
+        author_address: Option<String>,
+    },
+    #[serde(rename = "finalized_block")]
+    FinalizedBlock {
+        round: String,
+        author: String,
+        now_ts_ms: String,
+        author_dns: Option<String>,
+        author_address: Option<String>,
+        epoch: String,
+        seq_num: String,
+        block_ts_ms: String,
+    },
 }
 
 fn main() -> std::io::Result<()> {
@@ -105,27 +110,48 @@ fn parse_stdin(our_addresses: &[String]) -> std::io::Result<()> {
         match serde_json::from_str::<LogEntry>(&line) {
             Ok(log_entry) => {
                 read_lines.with_label_values(&["success"]).inc();
-                match &log_entry.fields {
-                    LogFields::ProposedBlock(fields) => {
+                match log_entry.fields {
+                    LogFields::ProposedBlock {
+                        author,
+                        author_dns,
+                        author_address,
+                        ..
+                    } => {
+                        let operated_by_us: &str = if our_addresses.contains(&author) {
+                            "true"
+                        } else {
+                            "false"
+                        };
                         proposed_blocks
                             .with_label_values(&[
-                                fields.author.clone(),
-                                fields.author_dns.clone().unwrap_or("".into()),
-                                fields.author_address.clone().unwrap_or("".into()),
-                                our_addresses.contains(&fields.author).to_string(),
+                                author.as_str(),
+                                author_dns.as_deref().unwrap_or(""),
+                                author_address.as_deref().unwrap_or(""),
+                                operated_by_us,
                             ])
                             .inc();
                     }
-                    LogFields::SkippedBlock(fields) => {
+                    LogFields::SkippedBlock {
+                        author,
+                        author_dns,
+                        author_address,
+                        ..
+                    } => {
+                        let operated_by_us: &str = if our_addresses.contains(&author) {
+                            "true"
+                        } else {
+                            "false"
+                        };
                         skipped_blocks
                             .with_label_values(&[
-                                fields.author.clone(),
-                                fields.author_dns.clone().unwrap_or("".into()),
-                                fields.author_address.clone().unwrap_or("".into()),
-                                our_addresses.contains(&fields.author).to_string(),
+                                author.as_str(),
+                                author_dns.as_deref().unwrap_or(""),
+                                author_address.as_deref().unwrap_or(""),
+                                operated_by_us,
                             ])
                             .inc();
                     }
+                    LogFields::FinalizedBlock { .. } => {}
                 }
             }
             Err(e) => {
@@ -158,88 +184,93 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_skipped_block() {
-        let json = r#"{"timestamp":"2025-07-31T07:36:27.794234Z","level":"INFO","fields":{"message":"skipped_block","round":"6622784","author":"03de1f49f8a52a2f62196a6f88c436a37e5d3cd88b37588f4cab8f1dcdbf18148e","now_ts_ms":"1753947387794","author_dns":"64.130.43.22:8000"},"target":"ledger_tail"}"#;
+    fn test_parse_three_kinds() {
+        let proposed = r#"{"timestamp":"2025-08-29T13:10:36.585635Z","level":"INFO","fields":{"message":"proposed_block","round":"35507367","parent_round":"35507366","epoch":"677","seq_num":"33808561","num_tx":"29","author":"029efe69e22c0f7244e6566ad73537c3827801cd75da425f91235890da36888c9b","block_ts_ms":"1756473036514","now_ts_ms":"1756473036575","author_address":"84.32.220.55:8000"},"target":"ledger_tail"}"#;
+        let finalized = r#"{"timestamp":"2025-08-29T13:10:36.585640Z","level":"INFO","fields":{"message":"finalized_block","round":"35507364","parent_round":"35507363","epoch":"677","seq_num":"33808558","author":"02c34fa55bf2b2a80e3d562afb02710d19119ae02e5f079a2940bde57dadc3029f","block_ts_ms":"1756473035364","now_ts_ms":"1756473036575","author_address":"202.8.11.136:8000"},"target":"ledger_tail"}"#;
+        let skipped = r#"{"timestamp":"2025-07-31T07:36:27.794234Z","level":"INFO","fields":{"message":"skipped_block","round":"6622784","author":"03de1f49f8a52a2f62196a6f88c436a37e5d3cd88b37588f4cab8f1dcdbf18148e","now_ts_ms":"1753947387794","author_dns":"64.130.43.22:8000"},"target":"ledger_tail"}"#;
 
-        let log_entry: LogEntry = serde_json::from_str(json).unwrap();
+        let e1: LogEntry = serde_json::from_str(proposed).unwrap();
+        let e2: LogEntry = serde_json::from_str(finalized).unwrap();
+        let e3: LogEntry = serde_json::from_str(skipped).unwrap();
 
-        assert_eq!(log_entry.timestamp, "2025-07-31T07:36:27.794234Z");
-        assert_eq!(log_entry.level, "INFO");
-        assert_eq!(log_entry.target, "ledger_tail");
-
-        match log_entry.fields {
-            LogFields::SkippedBlock(fields) => {
-                assert_eq!(fields.message, "skipped_block");
-                assert_eq!(fields.round, "6622784");
+        assert_eq!(e1.level, "INFO");
+        assert_eq!(e1.target, "ledger_tail");
+        match e1.fields {
+            LogFields::ProposedBlock {
+                round,
+                epoch,
+                seq_num,
+                num_tx,
+                author,
+                block_ts_ms,
+                now_ts_ms,
+                author_dns,
+                author_address,
+            } => {
+                assert_eq!(round, "35507367");
+                assert_eq!(epoch, "677");
+                assert_eq!(seq_num, "33808561");
+                assert_eq!(num_tx, "29");
                 assert_eq!(
-                    fields.author,
+                    author,
+                    "029efe69e22c0f7244e6566ad73537c3827801cd75da425f91235890da36888c9b"
+                );
+                assert_eq!(block_ts_ms, "1756473036514");
+                assert_eq!(now_ts_ms, "1756473036575");
+                assert_eq!(author_dns, None);
+                assert_eq!(author_address, Some("84.32.220.55:8000".into()));
+            }
+            _ => panic!("expected ProposedBlock"),
+        }
+
+        assert_eq!(e2.level, "INFO");
+        assert_eq!(e2.target, "ledger_tail");
+        match e2.fields {
+            LogFields::FinalizedBlock {
+                round,
+                epoch,
+                seq_num,
+                author,
+                block_ts_ms,
+                now_ts_ms,
+                author_dns,
+                author_address,
+            } => {
+                assert_eq!(round, "35507364");
+                assert_eq!(epoch, "677");
+                assert_eq!(seq_num, "33808558");
+                assert_eq!(
+                    author,
+                    "02c34fa55bf2b2a80e3d562afb02710d19119ae02e5f079a2940bde57dadc3029f"
+                );
+                assert_eq!(block_ts_ms, "1756473035364");
+                assert_eq!(now_ts_ms, "1756473036575");
+                assert_eq!(author_dns, None);
+                assert_eq!(author_address, Some("202.8.11.136:8000".into()));
+            }
+            _ => panic!("expected FinalizedBlock"),
+        }
+
+        assert_eq!(e3.level, "INFO");
+        assert_eq!(e3.target, "ledger_tail");
+        match e3.fields {
+            LogFields::SkippedBlock {
+                round,
+                author,
+                now_ts_ms,
+                author_dns,
+                author_address,
+            } => {
+                assert_eq!(round, "6622784");
+                assert_eq!(
+                    author,
                     "03de1f49f8a52a2f62196a6f88c436a37e5d3cd88b37588f4cab8f1dcdbf18148e"
                 );
-                assert_eq!(fields.now_ts_ms, "1753947387794");
-                assert_eq!(fields.author_dns, Some("64.130.43.22:8000".into()));
-                assert_eq!(fields.author_address, None);
+                assert_eq!(now_ts_ms, "1753947387794");
+                assert_eq!(author_dns, Some("64.130.43.22:8000".into()));
+                assert_eq!(author_address, None);
             }
-            _ => panic!("Expected SkippedBlock fields"),
-        }
-    }
-
-    #[test]
-    fn test_parse_proposed_block() {
-        let json = r#"{"timestamp":"2025-07-31T07:36:27.794242Z","level":"INFO","fields":{"message":"proposed_block","round":"6622785","epoch":"122","seq_num":"6081798","num_tx":"0","author":"02d1e8a85c90d37799387cbfe7c53b45f24d4dca5674553bd442f36e45fdbb5b91","block_ts_ms":"1753947382250","now_ts_ms":"1753947387794","author_dns":"84.32.103.144:8000"},"target":"ledger_tail"}"#;
-
-        let log_entry: LogEntry = serde_json::from_str(json).unwrap();
-
-        assert_eq!(log_entry.timestamp, "2025-07-31T07:36:27.794242Z");
-        assert_eq!(log_entry.level, "INFO");
-        assert_eq!(log_entry.target, "ledger_tail");
-
-        match log_entry.fields {
-            LogFields::ProposedBlock(fields) => {
-                assert_eq!(fields.message, "proposed_block");
-                assert_eq!(fields.round, "6622785");
-                assert_eq!(fields.epoch, "122");
-                assert_eq!(fields.seq_num, "6081798");
-                assert_eq!(fields.num_tx, "0");
-                assert_eq!(
-                    fields.author,
-                    "02d1e8a85c90d37799387cbfe7c53b45f24d4dca5674553bd442f36e45fdbb5b91"
-                );
-                assert_eq!(fields.block_ts_ms, "1753947382250");
-                assert_eq!(fields.now_ts_ms, "1753947387794");
-                assert_eq!(fields.author_dns, Some("84.32.103.144:8000".into()));
-                assert_eq!(fields.author_address, None);
-            }
-            _ => panic!("Expected ProposedBlock fields"),
-        }
-    }
-
-    #[test]
-    fn test_parse_proposed_block_address() {
-        let json = r#"{"timestamp":"2025-07-31T07:36:27.794242Z","level":"INFO","fields":{"message":"proposed_block","round":"6622785","epoch":"122","seq_num":"6081798","num_tx":"0","author":"02d1e8a85c90d37799387cbfe7c53b45f24d4dca5674553bd442f36e45fdbb5b91","block_ts_ms":"1753947382250","now_ts_ms":"1753947387794","author_address":"84.32.103.144:8000"},"target":"ledger_tail"}"#;
-
-        let log_entry: LogEntry = serde_json::from_str(json).unwrap();
-
-        assert_eq!(log_entry.timestamp, "2025-07-31T07:36:27.794242Z");
-        assert_eq!(log_entry.level, "INFO");
-        assert_eq!(log_entry.target, "ledger_tail");
-
-        match log_entry.fields {
-            LogFields::ProposedBlock(fields) => {
-                assert_eq!(fields.message, "proposed_block");
-                assert_eq!(fields.round, "6622785");
-                assert_eq!(fields.epoch, "122");
-                assert_eq!(fields.seq_num, "6081798");
-                assert_eq!(fields.num_tx, "0");
-                assert_eq!(
-                    fields.author,
-                    "02d1e8a85c90d37799387cbfe7c53b45f24d4dca5674553bd442f36e45fdbb5b91"
-                );
-                assert_eq!(fields.block_ts_ms, "1753947382250");
-                assert_eq!(fields.now_ts_ms, "1753947387794");
-                assert_eq!(fields.author_address, Some("84.32.103.144:8000".into()));
-                assert_eq!(fields.author_dns, None);
-            }
-            _ => panic!("Expected ProposedBlock fields"),
+            _ => panic!("expected SkippedBlock"),
         }
     }
 }
