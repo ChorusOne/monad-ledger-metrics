@@ -1,21 +1,56 @@
-use std::{io::BufRead, net::SocketAddr};
+use std::{collections::HashMap, io::BufRead, net::SocketAddr, str::FromStr};
 
+use clap::Parser;
 use prometheus::{default_registry, register_int_counter_vec, Encoder, TextEncoder};
 use serde::{Deserialize, Serialize};
-use structopt::StructOpt;
 
-#[derive(StructOpt, Debug)]
-struct Opt {
-    /// Address for the Prometheus exporter to listen on
-    #[structopt(long)]
-    listen_addr: String,
-
-    /// Addresses that you operate. Metrics will have `operated_by_us=true` for
-    /// events matching these addresses.
-    #[structopt(long)]
-    our_addresses: Vec<String>,
+#[derive(Debug, Clone)]
+struct Identity {
+    addr: String,
+    name: String,
 }
 
+impl FromStr for Identity {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let (addr, name) = s
+            .split_once(':')
+            .ok_or_else(|| format!("invalid identity {s}, expected name:addr"))?;
+
+        if name.is_empty() || addr.is_empty() {
+            return Err(format!(
+                "invalid identity {s}, name and addr must be non-empty"
+            ));
+        }
+
+        Ok(Identity {
+            addr: addr.to_string(),
+            name: name.to_string(),
+        })
+    }
+}
+
+#[derive(Parser, Debug)]
+struct Opt {
+    /// Address for the Prometheus exporter to listen on
+    #[arg(long)]
+    listen_addr: String,
+
+    /// Mapping a secp pubkey to a human-friendly name
+    ///   --known-identity addressblablabla:chorus1 --known-identity addressblebleble:chorus2
+    #[arg(long = "known-identity")]
+    known_identities: Vec<Identity>,
+}
+
+impl Opt {
+    fn known_identities_map(&self) -> HashMap<String, String> {
+        self.known_identities
+            .iter()
+            .map(|id| (id.addr.clone(), id.name.clone()))
+            .collect()
+    }
+}
 #[derive(Debug, Serialize, Deserialize)]
 pub struct LogEntry {
     pub timestamp: String,
@@ -70,11 +105,12 @@ pub enum LogFields {
 }
 
 fn main() -> std::io::Result<()> {
-    let opt: Opt = Opt::from_args();
+    let opt = Opt::parse();
     let addr: SocketAddr = opt.listen_addr.parse().expect("Invalid listen-addr");
+    let known: HashMap<String, String> = opt.known_identities_map();
 
     let jh = std::thread::spawn(move || serve(&addr));
-    let sh = std::thread::spawn(move || parse_stdin(&opt.our_addresses));
+    let sh = std::thread::spawn(move || parse_stdin(known));
 
     jh.join().unwrap();
     sh.join().unwrap().unwrap();
@@ -82,18 +118,31 @@ fn main() -> std::io::Result<()> {
     Ok(())
 }
 
-fn parse_stdin(our_addresses: &[String]) -> std::io::Result<()> {
+fn parse_stdin(our_addresses: HashMap<String, String>) -> std::io::Result<()> {
     println!("Parsing metrics, our addresses are {our_addresses:?}");
     let proposed_blocks = register_int_counter_vec!(
         "monad_proposed_blocks",
         "Number of proposed blocks by author.",
-        &["author", "author_dns", "author_address", "operated_by_us"]
+        &[
+            "author",
+            "author_dns",
+            "author_address",
+            "operated_by_us",
+            "validator_name"
+        ]
     )
     .unwrap();
+
     let skipped_blocks = register_int_counter_vec!(
         "monad_skipped_blocks",
         "Number of skipped blocks by author.",
-        &["author", "author_dns", "author_address", "operated_by_us"]
+        &[
+            "author",
+            "author_dns",
+            "author_address",
+            "operated_by_us",
+            "validator_name"
+        ]
     )
     .unwrap();
 
@@ -110,7 +159,6 @@ fn parse_stdin(our_addresses: &[String]) -> std::io::Result<()> {
     let stdin = std::io::stdin();
     for line in stdin.lock().lines() {
         let line = line?;
-
         if line.trim().is_empty() {
             continue;
         }
@@ -125,17 +173,18 @@ fn parse_stdin(our_addresses: &[String]) -> std::io::Result<()> {
                         author_address,
                         ..
                     } => {
-                        let operated_by_us: &str = if our_addresses.contains(&author) {
-                            "true"
-                        } else {
-                            "false"
+                        let (operated_by_us, validator_name) = match our_addresses.get(&author) {
+                            Some(name) => ("true", name.as_str()),
+                            None => ("false", ""),
                         };
+
                         proposed_blocks
                             .with_label_values(&[
                                 author.as_str(),
                                 author_dns.as_deref().unwrap_or(""),
                                 author_address.as_deref().unwrap_or(""),
                                 operated_by_us,
+                                validator_name,
                             ])
                             .inc();
                     }
@@ -145,17 +194,18 @@ fn parse_stdin(our_addresses: &[String]) -> std::io::Result<()> {
                         author_address,
                         ..
                     } => {
-                        let operated_by_us: &str = if our_addresses.contains(&author) {
-                            "true"
-                        } else {
-                            "false"
+                        let (operated_by_us, validator_name) = match our_addresses.get(&author) {
+                            Some(name) => ("true", name.as_str()),
+                            None => ("false", ""),
                         };
+
                         skipped_blocks
                             .with_label_values(&[
                                 author.as_str(),
                                 author_dns.as_deref().unwrap_or(""),
                                 author_address.as_deref().unwrap_or(""),
                                 operated_by_us,
+                                validator_name,
                             ])
                             .inc();
                     }
@@ -166,17 +216,18 @@ fn parse_stdin(our_addresses: &[String]) -> std::io::Result<()> {
                         author_address,
                         ..
                     } => {
-                        let operated_by_us: &str = if our_addresses.contains(&author) {
-                            "true"
-                        } else {
-                            "false"
+                        let (operated_by_us, validator_name) = match our_addresses.get(&author) {
+                            Some(name) => ("true", name.as_str()),
+                            None => ("false", ""),
                         };
+
                         skipped_blocks
                             .with_label_values(&[
                                 author.as_str(),
                                 author_dns.as_deref().unwrap_or(""),
                                 author_address.as_deref().unwrap_or(""),
                                 operated_by_us,
+                                validator_name,
                             ])
                             .inc();
                     }
