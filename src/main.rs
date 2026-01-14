@@ -1,4 +1,10 @@
-use std::{collections::HashMap, io::BufRead, net::SocketAddr, str::FromStr};
+use std::{
+    collections::HashMap,
+    io::BufRead,
+    net::SocketAddr,
+    process::{Command, Stdio},
+    str::FromStr,
+};
 
 use clap::Parser;
 use prometheus::{default_registry, register_int_counter_vec, Encoder, TextEncoder};
@@ -36,6 +42,15 @@ struct Opt {
     /// Address for the Prometheus exporter to listen on
     #[arg(long)]
     listen_addr: String,
+
+    /// Path to the monad-ledger-tail binary
+    #[arg(long, default_value = "monad-ledger-tail")]
+    ledger_tail_bin: String,
+
+    /// Extra args to pass to monad-ledger-tail (space-separated)
+    ///   --ledger-tail-args "--ledger-path=/opt/validators/monad/monad-bft/ledger --forkpoint-path=/opt/validators/monad/monad-bft/config/forkpoint/forkpoint.toml"
+    #[arg(long = "ledger-tail-args", default_value = "", allow_hyphen_values = true)]
+    ledger_tail_args: String,
 
     /// Mapping a secp pubkey to a human-friendly name
     ///   --known-identity addressblablabla:chorus1 --known-identity addressblebleble:chorus2
@@ -107,18 +122,64 @@ pub enum LogFields {
 fn main() -> std::io::Result<()> {
     let opt = Opt::parse();
     let addr: SocketAddr = opt.listen_addr.parse().expect("Invalid listen-addr");
+
+    let _jh = std::thread::spawn(move || serve(&addr));
+
+    let ledger_tail_args = opt
+        .ledger_tail_args
+        .split_whitespace()
+        .filter(|arg| !arg.is_empty())
+        .collect::<Vec<_>>();
+
+    let mut child = Command::new(&opt.ledger_tail_bin)
+        .args(ledger_tail_args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .unwrap_or_else(|err| {
+            panic!(
+                "failed to start monad-ledger-tail at {}: {err}",
+                opt.ledger_tail_bin
+            )
+        });
+
+    println!(
+        "Started monad-ledger-tail (pid {})",
+        child.id()
+    );
+    if let Ok(Some(status)) = child.try_wait() {
+        eprintln!("monad-ledger-tail exited immediately with status {status}");
+        std::process::exit(1);
+    }
+
+    let stdout = child
+        .stdout
+        .take()
+        .expect("failed to capture monad-ledger-tail stdout");
+
     let known: HashMap<String, String> = opt.known_identities_map();
+    let sh = std::thread::spawn(move || {
+        let reader = std::io::BufReader::new(stdout);
+        parse_reader(reader, known)
+    });
 
-    let jh = std::thread::spawn(move || serve(&addr));
-    let sh = std::thread::spawn(move || parse_stdin(known));
+    let status = child
+        .wait()
+        .expect("failed to wait for monad-ledger-tail");
+    let _ = sh.join();
 
-    jh.join().unwrap();
-    sh.join().unwrap().unwrap();
-
-    Ok(())
+    if !status.success() {
+        eprintln!("monad-ledger-tail exited with status {status}");
+    } else {
+        eprintln!("monad-ledger-tail exited; shutting down exporter");
+    }
+    std::process::exit(1);
 }
 
-fn parse_stdin(our_addresses: HashMap<String, String>) -> std::io::Result<()> {
+fn parse_reader<R: BufRead>(
+    reader: R,
+    our_addresses: HashMap<String, String>,
+) -> std::io::Result<()> {
     println!("Parsing metrics, our addresses are {our_addresses:?}");
     let proposed_blocks = register_int_counter_vec!(
         "monad_proposed_blocks",
@@ -156,8 +217,7 @@ fn parse_stdin(our_addresses: HashMap<String, String>) -> std::io::Result<()> {
     read_lines.with_label_values(&["success"]).reset();
     read_lines.with_label_values(&["failure"]).reset();
 
-    let stdin = std::io::stdin();
-    for line in stdin.lock().lines() {
+    for line in reader.lines() {
         let line = line?;
         if line.trim().is_empty() {
             continue;
