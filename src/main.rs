@@ -1,14 +1,20 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     io::BufRead,
     net::SocketAddr,
     process::{Command, Stdio},
     str::FromStr,
+    time::Duration,
 };
 
 use clap::Parser;
-use prometheus::{default_registry, register_int_counter_vec, Encoder, TextEncoder};
+use prometheus::{
+    default_registry, register_int_counter_vec, register_int_gauge_vec, Encoder, IntGaugeVec,
+    TextEncoder,
+};
 use serde::{Deserialize, Serialize};
+
+mod staking;
 
 #[derive(Debug, Clone)]
 struct Identity {
@@ -56,6 +62,21 @@ struct Opt {
     ///   --known-identity addressblablabla:chorus1 --known-identity addressblebleble:chorus2
     #[arg(long = "known-identity")]
     known_identities: Vec<Identity>,
+
+    /// JSON-RPC endpoint
+    #[arg(long)]
+    rpc_url: String,
+
+    /// Staking precompile contract address.
+    #[arg(
+        long,
+        default_value = "0x0000000000000000000000000000000000001000"
+    )]
+    staking_contract_address: String,
+
+    /// How often to refresh the consensus validator set, in seconds.
+    #[arg(long, default_value_t = 60)]
+    validator_set_poll_secs: u64,
 }
 
 impl Opt {
@@ -124,6 +145,35 @@ fn main() -> std::io::Result<()> {
     let addr: SocketAddr = opt.listen_addr.parse().expect("Invalid listen-addr");
 
     let _jh = std::thread::spawn(move || serve(&addr));
+
+    let consensus_set_gauge = register_int_gauge_vec!(
+        "monad_validator_in_consensus_set",
+        "1 for each validator currently in the on-chain consensus validator set.",
+        &["author", "val_id"],
+    )
+    .unwrap();
+    
+    let poll_failures = register_int_counter_vec!(
+        "monad_validator_set_poll_failures",
+        "Number of failures while polling the on-chain consensus validator set.",
+        &["stage"],
+    )
+    .unwrap();
+
+    poll_failures.with_label_values(&["rpc"]).reset();
+
+    let rpc_url = opt.rpc_url.clone();
+    let staking_contract = opt.staking_contract_address.clone();
+    let poll_interval = Duration::from_secs(opt.validator_set_poll_secs.max(1));
+    std::thread::spawn(move || {
+        poll_consensus_set(
+            &rpc_url,
+            &staking_contract,
+            poll_interval,
+            consensus_set_gauge,
+            poll_failures,
+        )
+    });
 
     let ledger_tail_args = opt
         .ledger_tail_args
@@ -301,6 +351,50 @@ fn parse_reader<R: BufRead>(
         }
     }
     Ok(())
+}
+
+fn poll_consensus_set(
+    rpc_url: &str,
+    contract: &str,
+    interval: Duration,
+    gauge: IntGaugeVec,
+    failures: prometheus::IntCounterVec,
+) {
+    println!(
+        "Polling consensus validator set every {}s via {rpc_url} (contract {contract})",
+        interval.as_secs()
+    );
+
+    let mut previous: HashSet<(String, String)> = HashSet::new();
+
+    loop {
+        match staking::fetch_consensus_set(rpc_url, contract) {
+            Ok(current_map) => {
+                let current: HashSet<(String, String)> = current_map
+                    .iter()
+                    .map(|(pk, id)| (pk.clone(), id.to_string()))
+                    .collect();
+
+                for (pubkey, val_id) in previous.difference(&current) {
+                    let _ = gauge.remove_label_values(&[pubkey.as_str(), val_id.as_str()]);
+                }
+                
+                for (pubkey, val_id) in &current {
+                    gauge
+                        .with_label_values(&[pubkey.as_str(), val_id.as_str()])
+                        .set(1);
+                }
+
+                previous = current;
+            }
+            Err(e) => {
+                eprintln!("Failed to fetch consensus validator set: {e}");
+                failures.with_label_values(&["rpc"]).inc();
+            }
+        }
+
+        std::thread::sleep(interval);
+    }
 }
 
 fn serve(address: &SocketAddr) {
